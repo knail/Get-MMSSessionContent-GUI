@@ -33,7 +33,7 @@ Built on top of the excellent CopyMMSFiles project created by Andrew Johnson and
 3. Run:
 
 ```powershell
-.\Get-MMSSessionContent-GUI.ps1
+.\Get-MMSSessionContent_GUI.ps1
 ```
 
 ---
