@@ -1,4 +1,4 @@
-# Get-MMSSessionContent-GUI
+# Get-MMSSessionContent_GUI
 
 A Windows PowerShell graphical interface for discovering, filtering, and downloading Midwest Management Summit (MMS) session content from Sched.
 
