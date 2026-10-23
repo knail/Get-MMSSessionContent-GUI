@@ -77,4 +77,4 @@ This script is provided strictly AS-IS, with no guarantees, warranties, or suppo
 The author assumes no responsibility for any issues, data loss, service interruptions, or compatibility changes resulting from its use. 
 Users should thoroughly test the script in their own environment before relying on it. As of May 6, 2026, the script was tested successfully using the following configurations:
 
-Windows 11 26H2 using PowerShell 7.6.0 25H2 using PowerShell 7.6.6
+Windows 11 26H2 using PowerShell 7.6.6
