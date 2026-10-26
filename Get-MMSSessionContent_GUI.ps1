@@ -113,7 +113,7 @@
 .NOTES
 
     Script Name:           Get-MMSSessionContent-GUI.ps1
-    Version:               2.1.1-GUI
+    Version:               2.1.2-GUI
     Author:                Keith Nail
     Website:               https://www.my02dcents.com
     Created:               2026-10-23
@@ -135,6 +135,9 @@
     ----------    -----------   -------------   -----------------------------------
     2026-10-23    2.1.1-GUI     Keith Nail      Initial GUI release based on
                                                 Get-MMSSessionContent.ps1 v1.7.4
+
+    2026-10-23    2.1.2-GUI     Keith Nail      Updated GUI release with improved functionality
+                                                and bug fixes. Not to initially query past years of MMS conferences, but to allow the user to select the year of interest.
 
 .EXAMPLE
 
@@ -165,6 +168,7 @@
     https://mmsmoa.sched.com
 
 #>
+
 
 # ==================================================
 # MARK: Prerequisites and Assemblies
@@ -229,6 +233,15 @@ $Script:SuppressEvents = $false
 # ==================================================
 # MARK: Conference Catalog
 # ==================================================
+# Returns the 4-digit year in a conference ID, or 0 for legacy IDs without a year (treated as past)
+function Get-ConferenceYear {
+    param([Parameter(Mandatory = $true)][string]$ConfId)
+
+    $YearMatch = [System.Text.RegularExpressions.Regex]::Match($ConfId, '20\d{2}')
+    if ($YearMatch.Success) { return [int]$YearMatch.Value }
+    return 0
+}
+
 function New-ConferenceEntry {
     param(
         [Parameter(Mandatory = $true)][string]$Id,
@@ -240,9 +253,11 @@ function New-ConferenceEntry {
         Id           = $Id
         Name         = $Name
         Type         = $Type          # Public / Private / Discovered
+        Year         = Get-ConferenceYear -ConfId $Id
         Access       = 'Not queried'
         SessionCount = 0
         Checked      = $false
+        Queried      = $false
     }
 }
 
@@ -276,6 +291,21 @@ function Get-ConferenceInfo {
         if ($Conf.Id -ieq $ConfId) { return $Conf }
     }
     return $null
+}
+
+# A conference is "past" when its year is before the current year (legacy IDs with no year are past)
+function Test-IsPastConference {
+    param([Parameter(Mandatory = $true)][object]$Conf)
+
+    return ([int]$Conf.Year -lt (Get-Date).Year)
+}
+
+# Returns $true when the conference should be hidden because "Include past years" is not checked
+function Test-IsHiddenConference {
+    param([Parameter(Mandatory = $true)][object]$Conf)
+
+    if ($Script:ChkPast -and $Script:ChkPast.Checked) { return $false }
+    return (Test-IsPastConference -Conf $Conf)
 }
 # ==================================================
 # ^^^^^ Conference Catalog ^^^^^
@@ -531,7 +561,7 @@ function Show-CredentialPrompt {
     $Dlg.Font = New-Object -TypeName System.Drawing.Font -ArgumentList 'Segoe UI', 9
 
     $LblInfo = New-Object -TypeName System.Windows.Forms.Label
-    $LblInfo.Text = 'Enter your Sched credentials. The script will query all MMS conferences and list the ones you can access. Choose Skip for public content only.'
+    $LblInfo.Text = 'Enter your Sched credentials. The script will query current and upcoming MMS conferences and list the ones you can access. Choose Skip for public content only.'
     $LblInfo.Location = New-Object -TypeName System.Drawing.Point -ArgumentList 15, 12
     $LblInfo.Size = New-Object -TypeName System.Drawing.Size -ArgumentList 390, 50
     $Dlg.Controls.Add($LblInfo)
@@ -700,6 +730,12 @@ function Test-ConferenceAccess {
 
     $Conf.Access = 'Checking...'
     $Conf.SessionCount = 0
+    $Conf.Queried = $true
+
+    # Remove any previously loaded sessions for this conference
+    for ($SessIndex = $Script:SessionList.Count - 1; $SessIndex -ge 0; $SessIndex--) {
+        if ($Script:SessionList[$SessIndex].ConfId -eq $Conf.Id) { $Script:SessionList.RemoveAt($SessIndex) }
+    }
 
     $Script:Sessions.Remove($Conf.Id)
     $Script:EventCache.Remove($Conf.Id)
@@ -748,10 +784,14 @@ function Test-ConferenceExists {
     }
 }
 
-# Probes Sched for MMS conference IDs that are not in the known catalog
+# Probes Sched for MMS conference IDs that are not in the known catalog, within the given year range
 function Find-NewConferences {
-    $LastYear = (Get-Date).Year + 1
-    for ($Year = $Script:ProbeStartYear; $Year -le $LastYear; $Year++) {
+    param(
+        [Parameter(Mandatory = $true)][int]$StartYear,
+        [Parameter(Mandatory = $true)][int]$EndYear
+    )
+
+    for ($Year = $StartYear; $Year -le $EndYear; $Year++) {
         foreach ($Suffix in $Script:ProbeSuffixes) {
             if ($Script:CancelRequested) { return }
             $ProbeId = [string]$Year + $Suffix
@@ -766,41 +806,80 @@ function Find-NewConferences {
     }
 }
 
-# Full discovery: probe for new IDs, then test every conference and load sessions for accessible ones
+# Discovery.
+#   Default  : queries current-year and future conferences only (plus past years if "Include past years" is checked).
+#   PastOnly : queries only past conferences that have not been queried yet (keeps already loaded sessions).
 function Invoke-ConferenceDiscovery {
+    param([switch]$PastOnly)
+
     if ($Script:IsBusy) { return }
 
     $Script:Credential = Get-CurrentCredential
     $Script:CancelRequested = $false
+    $CurrentYear = (Get-Date).Year
+    $IncludePast = [bool]$Script:ChkPast.Checked
     Set-UiBusy -Busy $true
 
-    $Script:SessionList.Clear()
-    Update-SessionListView
+    if (-not $PastOnly) {
+        # Full re-query: reset everything
+        $Script:SessionList.Clear()
+        foreach ($Conf in $Script:ConferenceCatalog) {
+            $Conf.Queried = $false
+            $Conf.Access = 'Not queried'
+            $Conf.SessionCount = 0
+        }
+        Update-ConferenceListView
+        Update-SessionListView
+    }
 
     try {
-        if ($Script:Credential) { Write-Log -Message ('Querying MMS conferences as ' + $Script:Credential.UserName + ' ...') }
-        else { Write-Log -Message 'Querying MMS conferences (public content only) ...' }
+        if ($PastOnly) { $ScopeText = 'past years' }
+        elseif ($IncludePast) { $ScopeText = 'all years' }
+        else { $ScopeText = ('{0} and later' -f $CurrentYear) }
 
-        if ($Script:ChkProbe.Checked) { Find-NewConferences }
+        if ($Script:Credential) { Write-Log -Message ('Querying MMS conferences (' + $ScopeText + ') as ' + $Script:Credential.UserName + ' ...') }
+        else { Write-Log -Message ('Querying MMS conferences (' + $ScopeText + ', public content only) ...') }
 
-        $Total = $Script:ConferenceCatalog.Count
+        # Probe Sched for unknown conference IDs in the relevant year range
+        if ($Script:ChkProbe.Checked) {
+            if ($PastOnly) { Find-NewConferences -StartYear $Script:ProbeStartYear -EndYear ($CurrentYear - 1) }
+            elseif ($IncludePast) { Find-NewConferences -StartYear $Script:ProbeStartYear -EndYear ($CurrentYear + 1) }
+            else { Find-NewConferences -StartYear $CurrentYear -EndYear ($CurrentYear + 1) }
+        }
+
+        # Build the list of conferences to query
+        $Targets = New-Object -TypeName System.Collections.Generic.List[object]
+        foreach ($Conf in $Script:ConferenceCatalog) {
+            $IsPast = Test-IsPastConference -Conf $Conf
+            if ($PastOnly) {
+                if ($IsPast -and -not $Conf.Queried) { $Targets.Add($Conf) }
+            }
+            elseif ($IncludePast -or -not $IsPast) {
+                $Targets.Add($Conf)
+            }
+        }
+
+        $Total = $Targets.Count
         $Script:PbMain.Minimum = 0
         $Script:PbMain.Maximum = [System.Math]::Max($Total, 1)
         $Script:PbMain.Value = 0
 
         for ($Index = 0; $Index -lt $Total; $Index++) {
             if ($Script:CancelRequested) { Write-Log -Message 'Query cancelled by user.' -Level 'WARN'; break }
-            $Conf = $Script:ConferenceCatalog[$Index]
+            $Conf = $Targets[$Index]
             Set-Status -Text ('Checking {0} of {1}: {2} ({3})' -f ($Index + 1), $Total, $Conf.Name, $Conf.Id)
             Test-ConferenceAccess -Conf $Conf -Credential $Script:Credential
             Update-ConferenceListView
             $Script:PbMain.Value = $Index + 1
         }
 
-        $Accessible = @($Script:ConferenceCatalog | Where-Object { $_.Access -like 'Yes*' }).Count
+        $Accessible = @($Script:ConferenceCatalog | Where-Object { $_.Access -like 'Yes*' -and -not (Test-IsHiddenConference -Conf $_) }).Count
+        Update-ConferenceListView
         Update-SessionListView
-        Set-Status -Text ('Query complete. You can access {0} conference(s) with {1} session(s). Check conferences to filter sessions, then download.' -f $Accessible, $Script:SessionList.Count)
-        Write-Log -Message ('Query complete. Accessible conferences: {0} of {1}. Sessions loaded: {2}' -f $Accessible, $Total, $Script:SessionList.Count)
+        $StatusText = 'Query complete ({0}). You can access {1} conference(s) with {2} loaded session(s).' -f $ScopeText, $Accessible, $Script:SessionList.Count
+        if (-not $IncludePast) { $StatusText += ' Check "Include past years" to query older conferences.' }
+        Set-Status -Text $StatusText
+        Write-Log -Message ('Query complete ({0}). Conferences queried: {1}. Accessible: {2}. Sessions loaded: {3}' -f $ScopeText, $Total, $Accessible, $Script:SessionList.Count)
     }
     catch {
         $Err = $_
@@ -1136,7 +1215,7 @@ function Sync-SessionChecks {
     foreach ($Item in $Script:LvSess.Items) { $Item.Tag.Checked = [bool]$Item.Checked }
 }
 
-# Shows only accessible conferences unless "Show unavailable conferences" is checked
+# Shows accessible conferences (past years only when "Include past years" is checked)
 function Update-ConferenceListView {
     if (-not $Script:LvConf -or $Script:LvConf.IsDisposed) { return }
 
@@ -1145,6 +1224,7 @@ function Update-ConferenceListView {
     $Script:LvConf.BeginUpdate()
     $Script:LvConf.Items.Clear()
     foreach ($Conf in $Script:ConferenceCatalog) {
+        if (Test-IsHiddenConference -Conf $Conf) { continue }
         $IsAccessible = ([string]$Conf.Access -like 'Yes*')
         if (-not $IsAccessible -and -not $Script:ChkShowAll.Checked) { continue }
 
@@ -1162,7 +1242,7 @@ function Update-ConferenceListView {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-# Shows sessions of the checked conferences (all loaded sessions if none are checked), then applies the text filter
+# Shows sessions of the checked conferences (all visible sessions if none are checked), then applies the text filter
 function Update-SessionListView {
     if (-not $Script:LvSess -or $Script:LvSess.IsDisposed) { return }
 
@@ -1170,7 +1250,11 @@ function Update-SessionListView {
     Sync-SessionChecks
 
     $CheckedIds = @{}
-    foreach ($Conf in $Script:ConferenceCatalog) { if ($Conf.Checked) { $CheckedIds[$Conf.Id] = $true } }
+    $HiddenIds = @{}
+    foreach ($Conf in $Script:ConferenceCatalog) {
+        if (Test-IsHiddenConference -Conf $Conf) { $HiddenIds[$Conf.Id] = $true; continue }
+        if ($Conf.Checked) { $CheckedIds[$Conf.Id] = $true }
+    }
 
     $Filter = $Script:TxtFilter.Text.Trim()
     $ShownCount = 0
@@ -1178,6 +1262,7 @@ function Update-SessionListView {
     $Script:LvSess.BeginUpdate()
     $Script:LvSess.Items.Clear()
     foreach ($Sess in $Script:SessionList) {
+        if ($HiddenIds.ContainsKey($Sess.ConfId)) { continue }
         if ($CheckedIds.Count -gt 0 -and -not $CheckedIds.ContainsKey($Sess.ConfId)) { continue }
         if ($Filter) {
             $InTitle = ($Sess.Title.IndexOf($Filter, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
@@ -1203,17 +1288,17 @@ function Set-UiBusy {
     param([bool]$Busy)
 
     $Script:IsBusy = $Busy
-    foreach ($Ctrl in @($Script:BtnQuery, $Script:BtnAddConf, $Script:BtnDlSelected, $Script:BtnDlAll, $Script:BtnBrowse)) {
+    foreach ($Ctrl in @($Script:BtnQuery, $Script:BtnAddConf, $Script:BtnDlSelected, $Script:BtnDlAll, $Script:BtnBrowse, $Script:ChkPast)) {
         if ($Ctrl -and -not $Ctrl.IsDisposed) { $Ctrl.Enabled = -not $Busy }
     }
     if ($Script:BtnCancel -and -not $Script:BtnCancel.IsDisposed) { $Script:BtnCancel.Enabled = $Busy }
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-# Returns the accessible conference objects that are checked
+# Returns the accessible, visible conference objects that are checked
 function Get-CheckedConferences {
     Sync-ConferenceChecks
-    return @($Script:ConferenceCatalog | Where-Object { $_.Checked -and ([string]$_.Access -like 'Yes*') })
+    return @($Script:ConferenceCatalog | Where-Object { $_.Checked -and ([string]$_.Access -like 'Yes*') -and -not (Test-IsHiddenConference -Conf $_) })
 }
 # ==================================================
 # ^^^^^ GUI State Functions ^^^^^
@@ -1289,6 +1374,13 @@ $Script:BtnAddConf.Text = 'Add and Check'
 $Script:BtnAddConf.Location = New-Object -TypeName System.Drawing.Point -ArgumentList 460, 56
 $Script:BtnAddConf.Size = New-Object -TypeName System.Drawing.Size -ArgumentList 110, 27
 $GrpCreds.Controls.Add($Script:BtnAddConf)
+
+$Script:ChkPast = New-Object -TypeName System.Windows.Forms.CheckBox
+$Script:ChkPast.Text = 'Include past years (slower - Sched throttles requests)'
+$Script:ChkPast.Location = New-Object -TypeName System.Drawing.Point -ArgumentList 600, 60
+$Script:ChkPast.AutoSize = $true
+$Script:ChkPast.Checked = $false
+$GrpCreds.Controls.Add($Script:ChkPast)
 
 # ---------- Conferences group ----------
 $GrpConf = New-Object -TypeName System.Windows.Forms.GroupBox
@@ -1488,6 +1580,8 @@ $Script:BtnAddConf.Add_Click({
         $Conf = Get-ConferenceInfo -ConfId $NewId
         if (-not $Conf) {
             $Conf = New-ConferenceEntry -Id $NewId -Name ('MMS ' + $NewId + ' (manual)') -Type 'Discovered'
+            # Manually added IDs without a year are treated as current so they always show
+            if ($Conf.Year -eq 0) { $Conf.Year = (Get-Date).Year }
             $Script:ConferenceCatalog.Add($Conf)
         }
         $Script:TxtCustom.Text = ''
@@ -1532,6 +1626,37 @@ $BtnConfNone.Add_Click({
     })
 
 $Script:ChkShowAll.Add_CheckedChanged({ Update-ConferenceListView })
+
+# ---------- Include past years ----------
+$Script:ChkPast.Add_CheckedChanged({
+        if ($Script:ChkPast.Checked) {
+            # Query only the past conferences that have not been queried yet
+            Update-ConferenceListView
+            Update-SessionListView
+            Invoke-ConferenceDiscovery -PastOnly
+        }
+        else {
+            # Hide past conferences and clear their selections so they are not downloaded
+            $Script:SuppressEvents = $true
+            foreach ($Item in $Script:LvConf.Items) {
+                if (Test-IsPastConference -Conf $Item.Tag) { $Item.Checked = $false }
+            }
+            foreach ($Item in $Script:LvSess.Items) {
+                $ItemConf = Get-ConferenceInfo -ConfId $Item.Tag.ConfId
+                if ($ItemConf -and (Test-IsPastConference -Conf $ItemConf)) { $Item.Checked = $false }
+            }
+            $Script:SuppressEvents = $false
+            Sync-ConferenceChecks
+            Sync-SessionChecks
+            foreach ($Sess in $Script:SessionList) {
+                $SessConf = Get-ConferenceInfo -ConfId $Sess.ConfId
+                if ($SessConf -and (Test-IsPastConference -Conf $SessConf)) { $Sess.Checked = $false }
+            }
+            Update-ConferenceListView
+            Update-SessionListView
+            Set-Status -Text 'Past years hidden. Their results are kept and will show again if you re-check "Include past years".'
+        }
+    })
 
 # ---------- Session list helpers ----------
 $Script:TxtFilter.Add_TextChanged({ Update-SessionListView })
@@ -1619,7 +1744,7 @@ $Script:Form.Add_FormClosing({
         $Script:CancelRequested = $true
     })
 
-# Automatically discover conferences as soon as the window opens
+# Automatically discover current and future conferences as soon as the window opens
 $Script:Form.Add_Shown({
         Write-Log -Message ('MMS Session Content Downloader started. Log file: ' + $Script:LogFile)
         Update-ConferenceListView
@@ -1645,3 +1770,4 @@ $Script:Form.Dispose()
 # ==================================================
 # ^^^^^ Launch GUI ^^^^^
 # ==================================================
+
