@@ -6,6 +6,14 @@ Built on top of the excellent CopyMMSFiles project created by Andrew Johnson and
 
 ---
 
+## Screenshots
+
+### Main Window
+
+![Main Window](images/InitialLaunch.jpg)
+
+
+
 ## Features
 
 - Automatic MMS conference discovery
